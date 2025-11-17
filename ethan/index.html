@@ -1,52 +1,70 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8">
-    <title>Ethan</title>
-    <style>
-        body {
-            margin: 0;
-            background: #111;
-            color: white;
-            display: grid;
-            height: 100vh;
-            width: 100vw;
-            overflow: hidden;
-            font-family: sans-serif;
-        }
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>WAV Grid Player — Perfect Squares</title>
+<style>
+  :root { --bg: #111; --cell-border: 1px; --cell-padding: 10px; --text: #fff; }
+  html,body {
+    height:100%;
+    margin:0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    -webkit-font-smoothing:antialiased;
+    -moz-osx-font-smoothing:grayscale;
+    overflow:hidden; /* ensure no scrollbars */
+  }
 
-        #grid {
-            display: grid;
-            width: 100%;
-            height: 100%;
-            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-            grid-auto-rows: 1fr;
-        }
+  /* grid container fills viewport but centers the actual grid content */
+  #grid {
+    width:100%;
+    height:100%;
+    display:grid;
+    place-items:center; /* center the inner grid */
+  }
 
-        .cell {
-            border: 1px solid #333;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.3rem;
-            text-align: center;
-            cursor: pointer;
-            user-select: none;
-            padding: 10px;
-        }
+  /* inner grid that holds cells */
+  #inner {
+    display: grid;
+    /* grid-template-columns and grid-auto-rows will be set dynamically in JS as exact px values */
+    gap: 0; /* no gaps so squares fit perfectly */
+    box-sizing: border-box;
+  }
 
-        .cell:active {
-            background: #444;
-        }
-    </style>
+  .cell {
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    user-select:none;
+    cursor:pointer;
+    box-sizing: border-box;
+    padding: var(--cell-padding);
+    border: var(--cell-border) solid #222; /* border will be inside box-sizing */
+    background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.05));
+    font-size: clamp(12px, 2.6vw, 20px);
+    color: var(--text);
+    /* keep it square if JS fails for any reason */
+    aspect-ratio: 1/1;
+  }
+
+  .cell:active { transform: scale(0.995); filter: brightness(0.95); }
+</style>
 </head>
 <body>
 
-<div id="grid"></div>
+<div id="grid">
+  <div id="inner" aria-live="polite"></div>
+</div>
 
 <script>
-    // --- MODIFY THIS LIST WITH YOUR FILENAMES ---
-    const wavFiles = ["haha.wav",
+/* -------------------------
+   USER: list your .wav files
+   (files must be in clips/ folder)
+   ------------------------- */
+const wavFiles = ["haha.wav",
   "dont stop.wav",
   "do you like that.wav",
   "hey baby.wav",
@@ -58,46 +76,137 @@
   "yeah you like that.wav"
 ];
 
-    const grid = document.getElementById("grid");
+/* ---------- globals ---------- */
+const inner = document.getElementById('inner');
+const audioMap = {};
+let canPlay = true;
 
-    let audioElements = {};
-    let canPlay = true;
+/* preload */
+async function preload() {
+  for (const f of wavFiles) {
+    const a = new Audio('clips/' + f);
+    a.preload = 'auto';
+    audioMap[f] = a;
+    // don't await network; browsers will handle prefetching
+  }
+}
 
-    async function preloadSounds() {
-        for (let file of wavFiles) {
-            const audio = new Audio(`clips/${file}`);
-            audio.preload = "auto";
-            audioElements[file] = audio;
-        }
+/* create cells */
+function buildCells() {
+  inner.innerHTML = '';
+  for (const f of wavFiles) {
+    const name = f.replace(/\.wav$/i, '');
+    const div = document.createElement('div');
+    div.className = 'cell';
+    div.textContent = name;
+    div.dataset.file = f;
+
+    div.addEventListener('click', () => {
+      if (!canPlay) return;
+      const audio = audioMap[f];
+      if (!audio) return;
+      canPlay = false;
+      // stop and reset other audio (avoid overlap artifacts)
+      // but we only have one instance per clip; resetting currentTime is enough
+      audio.currentTime = 0;
+      audio.play().catch(()=>{}); // ignore play rejects (autoplay policy)
+      setTimeout(()=>{ canPlay = true; }, 200);
+    });
+
+    inner.appendChild(div);
+  }
+}
+
+/* compute best grid (max square size that fits) and apply pixel sizes */
+function computeAndApplyGrid() {
+  const count = wavFiles.length;
+  if (count === 0) {
+    inner.style.gridTemplateColumns = '';
+    inner.style.gridAutoRows = '';
+    return;
+  }
+
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+
+  // account for cell borders and padding inside size calculations
+  // measure an estimated extra per-cell (border + padding top + padding bottom)
+  // border declared as 1px in CSS and padding var; we can compute exact pixels:
+  const computed = getComputedStyle(document.documentElement);
+  const cellPadding = parseFloat(getComputedStyle(document.querySelector('.cell') || document.documentElement)
+                        .getPropertyValue('padding-top')) || 10;
+  const cellBorder = parseFloat(getComputedStyle(document.querySelector('.cell') || document.documentElement)
+                        .getPropertyValue('border-top-width')) || 1;
+
+  const extraVert = (cellPadding * 2) + (cellBorder * 2); // vertical space inside each cell added to height
+  const extraHoriz = extraVert; // symmetric
+
+  let best = { cols: 1, size: 0 };
+
+  for (let cols = 1; cols <= count; cols++) {
+    const rows = Math.ceil(count / cols);
+
+    // available width/height for the *content* of squares (including extra)
+    const rawCellW = Math.floor(w / cols);
+    const rawCellH = Math.floor(h / rows);
+
+    // cell size must include the extra interior; we compute the size that the browser
+    // will allocate to the grid cell (including border/padding). To be safe we subtract a
+    // tiny epsilon to avoid rounding overflow.
+    const cellSize = Math.min(rawCellW, rawCellH) - 0; // no subtraction; we will ensure fit by using Math.floor later
+
+    // ensure positive
+    if (cellSize <= 0) continue;
+
+    if (cellSize > best.size) {
+      best = { cols, size: cellSize };
     }
+  }
 
-    function createGrid() {
-        wavFiles.forEach(file => {
-            const name = file.replace(".wav", "");
-            const cell = document.createElement("div");
-            cell.className = "cell";
-            cell.textContent = name;
+  // if best.size is very small fallback to 1 column
+  if (best.size < 1) best = { cols: 1, size: Math.floor(Math.min(w, h)) };
 
-            cell.addEventListener("click", () => {
-                if (!canPlay) return;
+  // round down size to integer pixels and ensure rows * size <= h (re-check)
+  const chosenCols = best.cols;
+  let chosenSize = Math.floor(best.size);
 
-                canPlay = false;
-                const audio = audioElements[file];
+  // re-evaluate rows and make sure it fits; if not, shrink chosenSize
+  let rows = Math.ceil(count / chosenCols);
+  while (rows * chosenSize > window.innerHeight && chosenSize > 1) {
+    chosenSize--;
+  }
 
-                audio.currentTime = 0;
-                audio.play();
+  // apply pixel widths & heights (these determine exact square box each grid cell occupies)
+  inner.style.gridTemplateColumns = `repeat(${chosenCols}, ${chosenSize}px)`;
+  inner.style.gridAutoRows = `${chosenSize}px`;
 
-                setTimeout(() => {
-                    canPlay = true;
-                }, 200);
-            });
+  // center inner grid inside full viewport (outer #grid uses place-items:center)
+  // Also ensure inner doesn't exceed viewport due to borders; if it does, scale down
+  const totalW = chosenCols * chosenSize;
+  const totalH = rows * chosenSize;
+  if (totalW > window.innerWidth || totalH > window.innerHeight) {
+    // compute max size that fits both axes
+    const maxByW = Math.floor(window.innerWidth / chosenCols);
+    const maxByH = Math.floor(window.innerHeight / rows);
+    const safeSize = Math.min(maxByW, maxByH);
+    inner.style.gridTemplateColumns = `repeat(${chosenCols}, ${safeSize}px)`;
+    inner.style.gridAutoRows = `${safeSize}px`;
+  }
+}
 
-            grid.appendChild(cell);
-        });
-    }
+/* build and compute on load + resize */
+async function init() {
+  await preload();
+  buildCells();
+  computeAndApplyGrid();
+  // recompute when fonts/metrics settle a short time later
+  setTimeout(computeAndApplyGrid, 120);
+}
 
-    preloadSounds().then(createGrid);
+window.addEventListener('resize', computeAndApplyGrid);
+window.addEventListener('orientationchange', computeAndApplyGrid);
+
+init();
 </script>
-
 </body>
 </html>
